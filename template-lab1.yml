@@ -1,0 +1,172 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Programmatically Utilizing Data From S3
+
+Parameters:
+  DeployerIdentifier:
+    Description: Identifier for the person deploying the stack (e.g., user_1, user_2).
+    Type: String
+    AllowedPattern: "[a-zA-Z0-9_]*"
+    ConstraintDescription: Must be alphanumeric only.
+
+Resources:
+  UsersSiteBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Join
+        - "-"
+        - - random-users
+          - !Ref "AWS::AccountId"
+          - !Ref DeployerIdentifier
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
+      WebsiteConfiguration:
+        IndexDocument: index.html
+
+  UsersDataBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Join
+        - "-"
+        - - random-users-data
+          - !Ref "AWS::AccountId"
+          - !Ref DeployerIdentifier
+
+  UsersSiteBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref "UsersSiteBucket"
+      PolicyDocument:
+        Statement:
+          - Sid: PublicRead
+            Effect: Allow
+            Principal: "*"
+            Action:
+              - s3:GetObject
+            Resource:
+              - !Join
+                - ""
+                - - !GetAtt "UsersSiteBucket.Arn"
+                  - /*
+
+  CopyUsers:
+    Type: Custom::CopyUsers
+    Properties:
+      ServiceToken: !GetAtt "CopyFunction.Arn"
+      DestBucket: !Ref "UsersSiteBucket"
+      SourceBucket: embs-labs1-882692629600
+      APIGatewayURL: !Sub "https://${UsersAPI}.execute-api.${AWS::Region}.amazonaws.com"
+      Objects:
+        - index.html
+        - randomusers.css
+        - randomusers.js
+        - icon.png
+    DependsOn:
+      - UsersSiteBucket
+
+  CopyData:
+    Type: Custom::CopyData
+    Properties:
+      ServiceToken: !GetAtt "CopyFunction.Arn"
+      DestBucket: !Ref "UsersDataBucket"
+      SourceBucket: embs-labs1-882692629600
+      APIGatewayURL: !Sub "https://${UsersAPI}.execute-api.${AWS::Region}.amazonaws.com"
+      Objects:
+        - users_1.json
+        - users_2.json
+        - users_3.json
+    DependsOn:
+      - UsersDataBucket
+
+  CopyRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Path: /
+      Policies:
+        - PolicyName: lambda-copier
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:*
+                Resource:
+                  - !Sub "arn:aws:s3:::*"
+
+  CopyFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description:
+        Copies objects from source bucket, modifies API Gateway Placeholder
+        to URL from stack.
+      Handler: lambda_function.handler
+      Runtime: python3.7
+      Role: !GetAtt "CopyRole.Arn"
+      Timeout: 240
+      Code:
+        S3Bucket: embs-labs1-882692629600
+        S3Key: users-index-provisioning-lab.zip
+      FunctionName: !Sub "users-index-provisioner-${DeployerIdentifier}"
+
+
+  LambdaS3Admin:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+
+  UsersFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: function.handler
+      Role: !GetAtt "LambdaS3Admin.Arn"
+      Code:
+        S3Bucket: embs-labs1-882692629600
+        S3Key: users-primary.zip
+      Runtime: python3.8
+      Timeout: 60
+      FunctionName: !Sub "Users_primary-${DeployerIdentifier}"
+
+
+  APIGatewayUsersLambdaPerm:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt "UsersFunction.Arn"
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+
+  UsersAPI:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub "Users API ${DeployerIdentifier}"
+      ProtocolType: HTTP
+      Target: !GetAtt "UsersFunction.Arn"
+
+
+Outputs:
+  pubIpAddress1:
+    Description: Random Users site URL
+    Value: !GetAtt "UsersSiteBucket.WebsiteURL"
+
+  pubIpAddress2:
+    Description: Random Users data storage bucket
+    Value: !Ref "UsersDataBucket"
